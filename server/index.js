@@ -6,7 +6,9 @@ import { fileURLToPath } from 'url';
 import { dirname, join, extname } from 'path';
 import fs from 'fs';
 import ffmpeg from 'fluent-ffmpeg';
+import mime from 'mime-types';
 import crypto from 'crypto';
+import { PassThrough } from 'stream';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -315,9 +317,34 @@ process.on('exit', () => {
 });
 
 // Helper function to check if a video needs transcoding
-function needsTranscoding(fullPath) {
+async function needsTranscoding(fullPath) {
   const ext = extname(fullPath).toLowerCase();
-  return !['.mp4', '.webm'].includes(ext);
+  // Check container format first
+  if (!['.mp4', '.webm'].includes(ext)) {
+    return true;
+  }
+
+  // Check actual codecs
+  try {
+    const metadata = await getVideoMetadata(fullPath);
+    const videoStream = metadata.streams.find(s => s.codec_type === 'video');
+    const audioStreams = metadata.streams.filter(s => s.codec_type === 'audio');
+
+    // Validate video codec
+    if (!videoStream || videoStream.codec_name !== 'h264') {
+      return true;
+    }
+
+    // Validate audio codecs (all tracks must be AAC)
+    if (audioStreams.length > 0 && audioStreams.some(a => a.codec_name !== 'aac')) {
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error('Error checking codecs:', error);
+    return true; // Transcode if we can't verify codecs
+  }
 }
 
 // Helper function to get video stream configuration
@@ -365,10 +392,11 @@ app.get('/api/videos/stream/*', async (req, res) => {
       return res.status(404).json({ error: 'Video not found' });
     }
 
-    const requiresTranscoding = needsTranscoding(fullPath);
+    const requiresTranscoding = await needsTranscoding(fullPath); // Add await
 
     if (!requiresTranscoding) {
       // For web-compatible formats, stream directly with range support
+      const contentType = mime.lookup(fullPath) || 'video/mp4';
       const stat = fs.statSync(fullPath);
       const fileSize = stat.size;
       const range = req.headers.range;
